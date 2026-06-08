@@ -1,0 +1,15 @@
+{
+  "name": "n8n-proxmox-provisioner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Starter provisioner API for WHMCS n8n module",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "fastify": "^4.28.1"
+  }
+}

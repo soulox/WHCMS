@@ -1,0 +1,295 @@
+export class ProxmoxClient {
+  constructor(options) {
+    this.options = options
+    this.baseUrl = String(options.apiUrl || '').replace(/\/+$/, '')
+
+    if (options.tlsInsecure) {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+    }
+  }
+
+  async provisionTenant(payload, plan) {
+    const node = this.pickNode(payload.region)
+    const vmid = await this.getNextVmid()
+    const guestType = plan.guestType || 'lxc'
+    const hostname = buildHostname(payload, vmid)
+
+    if (guestType === 'qemu') {
+      return this.provisionQemu(node, vmid, hostname, payload, plan)
+    }
+
+    return this.provisionLxc(node, vmid, hostname, payload, plan)
+  }
+
+  async provisionLxc(node, vmid, hostname, payload, plan) {
+    const cloneTask = await this.requestNodeTask(node, 'POST', `/nodes/${node}/lxc/${this.options.lxcTemplateVmid}/clone`, {
+      newid: vmid,
+      hostname,
+      full: 1,
+      storage: this.options.storage,
+      target: node
+    })
+    await this.waitForTask(node, cloneTask)
+
+    const configTask = await this.requestNodeTask(node, 'PUT', `/nodes/${node}/lxc/${vmid}/config`, {
+      cores: plan.resources.cpuCores,
+      memory: plan.resources.memoryMb,
+      swap: this.options.swapMb,
+      net0: `name=eth0,bridge=${this.options.bridge},ip=dhcp`,
+      onboot: 1,
+      tags: `whmcs;service-${payload.service_id};plan-${payload.plan_code};type-lxc`
+    })
+    await this.waitForTask(node, configTask)
+
+    const diskTask = await this.requestNodeTask(node, 'PUT', `/nodes/${node}/lxc/${vmid}/resize`, {
+      disk: 'rootfs',
+      size: `${plan.resources.diskGb}G`
+    })
+    await this.waitForTask(node, diskTask)
+
+    const startTask = await this.requestNodeTask(node, 'POST', `/nodes/${node}/lxc/${vmid}/status/start`)
+    await this.waitForTask(node, startTask)
+
+    return {
+      proxmoxNode: node,
+      guestId: vmid,
+      guestType: 'lxc',
+      resources: plan.resources,
+      status: 'running'
+    }
+  }
+
+  async provisionQemu(node, vmid, hostname, payload, plan) {
+    if (!this.options.kvmTemplateVmid) {
+      throw new Error('PROXMOX_KVM_TEMPLATE_VMID is required for qemu plans.')
+    }
+
+    const cloneTask = await this.requestNodeTask(node, 'POST', `/nodes/${node}/qemu/${this.options.kvmTemplateVmid}/clone`, {
+      newid: vmid,
+      name: hostname,
+      full: 1,
+      storage: this.options.storage,
+      target: node
+    })
+    await this.waitForTask(node, cloneTask)
+
+    const configTask = await this.requestNodeTask(node, 'PUT', `/nodes/${node}/qemu/${vmid}/config`, {
+      cores: plan.resources.cpuCores,
+      memory: plan.resources.memoryMb,
+      net0: `virtio,bridge=${this.options.bridge}`,
+      onboot: 1,
+      tags: `whmcs;service-${payload.service_id};plan-${payload.plan_code};type-qemu`
+    })
+    await this.waitForTask(node, configTask)
+
+    const diskTask = await this.requestNodeTask(node, 'PUT', `/nodes/${node}/qemu/${vmid}/resize`, {
+      disk: 'scsi0',
+      size: `${plan.resources.diskGb}G`
+    })
+    await this.waitForTask(node, diskTask)
+
+    const startTask = await this.requestNodeTask(node, 'POST', `/nodes/${node}/qemu/${vmid}/status/start`)
+    await this.waitForTask(node, startTask)
+
+    return {
+      proxmoxNode: node,
+      guestId: vmid,
+      guestType: 'qemu',
+      resources: plan.resources,
+      status: 'running'
+    }
+  }
+
+  async resizeTenant(tenant, plan) {
+    const { node, vmid, guestType } = this.assertTenantRuntime(tenant)
+    const basePath = guestType === 'qemu' ? `/nodes/${node}/qemu/${vmid}` : `/nodes/${node}/lxc/${vmid}`
+
+    const cfg = {
+      cores: plan.resources.cpuCores,
+      memory: plan.resources.memoryMb
+    }
+    if (guestType !== 'qemu') {
+      cfg.swap = this.options.swapMb
+    }
+
+    const cfgTask = await this.requestNodeTask(node, 'PUT', `${basePath}/config`, cfg)
+    await this.waitForTask(node, cfgTask)
+
+    const currentDisk = Number(tenant.resources?.diskGb || 0)
+    const targetDisk = Number(plan.resources.diskGb || 0)
+    if (targetDisk > currentDisk) {
+      const delta = targetDisk - currentDisk
+      const diskTask = await this.requestNodeTask(node, 'PUT', `${basePath}/resize`, {
+        disk: guestType === 'qemu' ? 'scsi0' : 'rootfs',
+        size: `+${delta}G`
+      })
+      await this.waitForTask(node, diskTask)
+    }
+
+    return { resources: plan.resources }
+  }
+
+  async suspendTenant(tenant) {
+    const { node, vmid, guestType } = this.assertTenantRuntime(tenant)
+    const task = await this.requestNodeTask(node, 'POST', this.statusPath(node, vmid, guestType, 'suspend'))
+    await this.waitForTask(node, task)
+    return { status: 'suspended' }
+  }
+
+  async unsuspendTenant(tenant) {
+    const { node, vmid, guestType } = this.assertTenantRuntime(tenant)
+    const command = guestType === 'qemu' ? 'resume' : 'resume'
+    const task = await this.requestNodeTask(node, 'POST', this.statusPath(node, vmid, guestType, command))
+    await this.waitForTask(node, task)
+    return { status: 'running' }
+  }
+
+  async terminateTenant(tenant) {
+    const { node, vmid, guestType } = this.assertTenantRuntime(tenant)
+    const basePath = guestType === 'qemu' ? `/nodes/${node}/qemu/${vmid}` : `/nodes/${node}/lxc/${vmid}`
+
+    const stopTask = await this.requestNodeTask(node, 'POST', `${basePath}/status/stop`, { timeout: 30 })
+    await this.waitForTask(node, stopTask, true)
+
+    const body = { purge: 1, 'destroy-unreferenced-disks': 1 }
+    const delTask = await this.requestNodeTask(node, 'DELETE', basePath, body)
+    await this.waitForTask(node, delTask)
+
+    return { status: 'terminated' }
+  }
+
+  async restartTenant(tenant) {
+    const { node, vmid, guestType } = this.assertTenantRuntime(tenant)
+    const task = await this.requestNodeTask(node, 'POST', this.statusPath(node, vmid, guestType, 'reboot'))
+    await this.waitForTask(node, task)
+    return { status: 'running' }
+  }
+
+  async snapshotTenant(tenant, label = 'manual') {
+    const { node, vmid, guestType } = this.assertTenantRuntime(tenant)
+    const basePath = guestType === 'qemu' ? `/nodes/${node}/qemu/${vmid}` : `/nodes/${node}/lxc/${vmid}`
+    const name = `${label}-${new Date().toISOString().replace(/[:.]/g, '-')}`
+    const task = await this.requestNodeTask(node, 'POST', `${basePath}/snapshot`, {
+      snapname: name,
+      description: `Created by make provisioner (${label})`
+    })
+    await this.waitForTask(node, task)
+    return { snapshotName: name }
+  }
+
+  statusPath(node, vmid, guestType, action) {
+    const kind = guestType === 'qemu' ? 'qemu' : 'lxc'
+    return `/nodes/${node}/${kind}/${vmid}/status/${action}`
+  }
+
+  pickNode(region) {
+    if (!region) {
+      return this.options.defaultNode
+    }
+    return this.options.regionNodeMap[region] || this.options.defaultNode
+  }
+
+  assertTenantRuntime(tenant) {
+    const node = tenant.proxmoxNode
+    const vmid = tenant.guestId
+    const guestType = tenant.guestType || 'lxc'
+    if (!node || !vmid) {
+      throw new Error('Tenant runtime metadata missing (proxmoxNode/guestId).')
+    }
+    return { node, vmid, guestType }
+  }
+
+  async getNextVmid() {
+    const response = await this.request('GET', '/cluster/nextid')
+    return Number(response.data)
+  }
+
+  async requestNodeTask(node, method, path, body) {
+    const response = await this.request(method, path, body)
+    const upid = response.data
+    if (!upid || typeof upid !== 'string') {
+      throw new Error(`Unexpected Proxmox task response for ${path}`)
+    }
+    return upid
+  }
+
+  async waitForTask(node, upid, ignoreStopError = false) {
+    const encoded = encodeURIComponent(upid)
+    const maxAttempts = 120
+
+    for (let i = 0; i < maxAttempts; i += 1) {
+      const response = await this.request('GET', `/nodes/${node}/tasks/${encoded}/status`)
+      const data = response.data || {}
+      if (data.status === 'stopped') {
+        const exitStatus = String(data.exitstatus || '')
+        if (exitStatus !== 'OK') {
+          if (ignoreStopError && /does not exist|not running/i.test(exitStatus)) {
+            return
+          }
+          throw new Error(`Proxmox task failed: ${exitStatus}`)
+        }
+        return
+      }
+
+      await sleep(1000)
+    }
+
+    throw new Error('Proxmox task timed out.')
+  }
+
+  async request(method, path, body) {
+    const url = `${this.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
+    const headers = {
+      Authorization: `PVEAPIToken=${this.options.apiTokenId}=${this.options.apiTokenSecret}`
+    }
+
+    let payload
+    if (body && method !== 'GET') {
+      payload = new URLSearchParams()
+      Object.entries(body).forEach(([key, value]) => {
+        if (value === undefined || value === null) return
+        payload.append(key, String(value))
+      })
+      headers['Content-Type'] = 'application/x-www-form-urlencoded'
+    }
+
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: payload
+    })
+
+    const raw = await response.text()
+    let json
+    try {
+      json = JSON.parse(raw)
+    } catch {
+      throw new Error(`Invalid Proxmox response (${response.status}): ${raw}`)
+    }
+
+    if (!response.ok) {
+      const message = json?.errors ? JSON.stringify(json.errors) : json?.message || raw
+      throw new Error(`Proxmox API error (${response.status}): ${message}`)
+    }
+
+    return json
+  }
+}
+
+function buildHostname(payload, vmid) {
+  const raw = payload.hostname || payload.custom_domain || `make-${payload.service_id}`
+  const normalized = String(raw)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+
+  if (normalized.length >= 3) {
+    return normalized.slice(0, 63)
+  }
+  return `make-${vmid}`
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}

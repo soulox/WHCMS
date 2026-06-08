@@ -1,0 +1,53 @@
+{
+  "starter_5g": {
+    "resources": {
+      "cpu_cores": 1,
+      "memory_mb": 2048,
+      "disk_gb": 5
+    },
+    "limits": {
+      "active_workflows": 5,
+      "executions_per_month": 2500,
+      "bandwidth": "unmetered"
+    },
+    "features": {
+      "custom_domain": false,
+      "priority_support": false,
+      "backup_frequency": "daily"
+    }
+  },
+  "pro_20g": {
+    "resources": {
+      "cpu_cores": 2,
+      "memory_mb": 4096,
+      "disk_gb": 20
+    },
+    "limits": {
+      "active_workflows": 25,
+      "executions_per_month": 15000,
+      "bandwidth": "unmetered"
+    },
+    "features": {
+      "custom_domain": false,
+      "priority_support": true,
+      "backup_frequency": "daily"
+    }
+  },
+  "scale_50g": {
+    "resources": {
+      "cpu_cores": 4,
+      "memory_mb": 8192,
+      "disk_gb": 50
+    },
+    "limits": {
+      "active_workflows": "unlimited",
+      "executions_per_month": 50000,
+      "bandwidth": "unmetered"
+    },
+    "features": {
+      "custom_domain": true,
+      "priority_support": true,
+      "backup_frequency": "hourly"
+    }
+  }
+}

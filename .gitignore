@@ -1,0 +1,8 @@
+*
+!.gitignore
+!WHMCS Modules/
+!WHMCS Modules/**
+!ois-nextjs/
+!ois-nextjs/**
+!proxmox-image-pipeline/
+!proxmox-image-pipeline/**
