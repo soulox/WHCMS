@@ -1,0 +1,21 @@
+$TTL 3600
+@   IN  SOA dns1.infra.local. admin.infra.local. (
+        2026041101 ; serial
+        3600       ; refresh
+        900        ; retry
+        1209600    ; expire
+        3600       ; minimum
+)
+
+@               IN  NS  dns1.infra.local.
+@               IN  NS  dns2.infra.local.
+
+dns1            IN  A   10.10.10.53
+dns2            IN  A   10.10.10.54
+pve26           IN  A   10.10.10.26
+localhost110    IN  A   10.10.10.110
+pve             IN  A   10.10.10.24
+pve27           IN  A   10.10.10.27
+pve5            IN  A   10.10.10.25
+n8n             IN  A   10.10.10.71
+m8n             IN  CNAME n8n.infra.local.

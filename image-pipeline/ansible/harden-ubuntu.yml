@@ -1,0 +1,75 @@
+---
+- name: Harden Ubuntu golden template
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    base_packages:
+      - qemu-guest-agent
+      - cloud-init
+      - curl
+      - ca-certificates
+      - sudo
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Upgrade installed packages
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: true
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name: "{{ base_packages }}"
+        state: present
+
+    - name: Ensure qemu guest agent service is enabled
+      ansible.builtin.service:
+        name: qemu-guest-agent
+        enabled: true
+        state: started
+      when: not ansible_check_mode
+
+    - name: Ensure cloud-init can use VMware and NoCloud sources
+      ansible.builtin.copy:
+        dest: /etc/cloud/cloud.cfg.d/99_pve_datasource.cfg
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          datasource_list: [ NoCloud, ConfigDrive, VMware, None ]
+
+    - name: Clear cloud-init instance state
+      ansible.builtin.command: cloud-init clean --logs
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Remove existing SSH host keys
+      ansible.builtin.shell: rm -f /etc/ssh/ssh_host_*
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Remove machine-id for clone uniqueness
+      ansible.builtin.file:
+        path: /etc/machine-id
+        state: absent
+      when: not ansible_check_mode
+
+    - name: Recreate empty machine-id file
+      ansible.builtin.file:
+        path: /etc/machine-id
+        state: touch
+        mode: "0444"
+      when: not ansible_check_mode
+
+    - name: Clean apt package cache
+      ansible.builtin.command: apt-get clean
+      changed_when: true
+      when: not ansible_check_mode
